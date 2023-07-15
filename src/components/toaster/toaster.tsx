@@ -1,14 +1,23 @@
 import { $, component$, createContextId, useContext, useContextProvider, useId, useSignal, useStyles$, useTask$ } from "@builder.io/qwik";
-import type { Signal, JSXNode , QRL} from "@builder.io/qwik";
+import type { Signal, JSXNode, QRL } from "@builder.io/qwik";
 import type { UlAttributes } from "../types";
-import { clsq, cssvar }  from '../utils';
+import { clsq, cssvar } from '../utils';
 import styles from './toaster.scss?inline';
 
-interface ToastProps {
+
+export interface ToastContentProps extends Omit<ToastProps, "content"> {
+  timeout: Signal<number>;
+}
+export interface ToastProps {
   id: string;
-  duration: number;
+  // ----
+  content: string | QRL<(props: ToastContentProps) => JSXNode>;
+  // ----
   position: 'start' | 'center' | 'end';
-  content: string | QRL<(props: ToastProps) => JSXNode>;
+  // ----
+  duration: number;
+  exitDuration: number;
+  // ----
   /**
    * Aria role: default 'status'.
    * @description The toast uses the html element output, which has implicit role 'status'
@@ -17,7 +26,7 @@ interface ToastProps {
   role: 'alert' | 'status';
   class?: string;
 }
-export type ToastParams = Partial<Omit<ToastProps, 'text'>>
+export type ToastParams = Partial<Omit<ToastProps, 'content'>>
 
 export const ToasterContext = createContextId<{
   toaster: Signal<HTMLElement>,
@@ -52,26 +61,36 @@ function flip(toaster?: HTMLElement) {
   }
   requestAnimationFrame(animate)
 }
- 
+
 export const useToaster = () => {
   const { toaster, toasts } = useContext(ToasterContext);
+
   return {
     add: $((content: ToastProps['content'], params: ToastParams = {}) => {
       params.id ||= crypto.randomUUID();
       params.duration ||= 1500;
       params.position ||= 'center';
       params.role ||= 'status';
+      params.exitDuration ||= 300;
       flip(toaster.value);
       toasts.value = toasts.value.concat({ content, ...params } as ToastProps);
+      return params.id!;
     }),
-    remove: $((id: string) => {
-      const index = toasts.value.findIndex(t => t.id === id);
-      toasts.value[index].duration = 0;
+    clear: $(() => {
+      toasts.value.forEach((toast) => {
+        toast.duration = 0;
+      })
       toasts.value = [...toasts.value];
     }),
+    remove: $((id: string) => {
+      const toast = toasts.value.find(t => t.id === id);
+      if (toast) {
+        toast.duration = 0;
+        toasts.value = [...toasts.value];
+      }
+    })
   }
 }
-
 
 export const Toaster = component$((props: UlAttributes) => {
   useStyles$(styles);
@@ -86,28 +105,76 @@ export const Toast = component$((props: ToastProps) => {
   const { toaster, toasts } = useContext(ToasterContext);
   const { content, position, ...attributes } = props;
   const itemId = useId();
-  const leaving = useSignal(false);
-  const toastPosition = position === 'center' ? position : `flex-${position}`;
+
+  const intervalId = useSignal<number>();
+  const timeoutId = useSignal<number>();
+
+  const leaving = useSignal<boolean>(false);
+  const timeout = useSignal(props.duration);
+
+  /* -------------------------------------------------------------------------- */
+  /*                              Animation States                              */
+  /* -------------------------------------------------------------------------- */
+  const remove = $(() => {
+    flip(toaster.value);
+    toasts.value = toasts.value.filter(t => t.id !== props.id);
+  });
+
+  const leaves = $(() => {
+    leaving.value = true;
+    setTimeout(remove, props.exitDuration);
+  });
+
+  /* -------------------------------------------------------------------------- */
+  /*                             Countdown Controls                             */
+  /* -------------------------------------------------------------------------- */
+  const start = $(() => {
+    const start = Date.now();
+
+    intervalId.value = setInterval(() => {
+      timeout.value = Math.max(props.duration - (Date.now() - start), 0);
+    }, 1);
+
+    timeoutId.value = setTimeout(leaves, props.duration);
+  });
+
+  const reset = $(() => {
+    clearInterval(intervalId.value);
+    clearTimeout(timeoutId.value);
+  });
+
+  /* ------------------------------------ . ----------------------------------- */
+  useTask$(({ cleanup }) => {
+    start();
+    cleanup(() => {
+      clearTimeout(intervalId.value)
+      clearTimeout(timeoutId.value)
+    });
+  });
 
   useTask$(({ track }) => {
-    track(() => props.duration);
-    const remove = () => {
-      flip(toaster.value);
-      toasts.value = toasts.value.filter(t => t.id !== props.id);
-    }
-    const leave = () => {
-      leaving.value = true;
-      setTimeout(remove, 300);
-    };
-    if (!props.duration) return leave();
-    const timeout = setTimeout(leave, props.duration);
-    return () => clearTimeout(timeout);
-  })
+    const duration = track(() => props.duration);
+    if (!duration) leaves();
+  });
 
+  return (<li
+    id={itemId}
 
-  return <li id={itemId} class={leaving.value ? 'leave' : ''} {...cssvar({toastPosition})}>
+    class={leaving.value ? 'leave' : ''}
+
+    onMouseEnter$={() => {
+      reset();
+    }}
+    onMouseLeave$={() => {
+      start();
+    }}
+
+    {...cssvar({
+      toastPosition: position === 'center' ? position : `flex-${position}`
+    })}
+  >
     <output {...attributes} class={clsq('toast', props.class)}>
-      {typeof content === 'string' ? content : content(props)}
+      {typeof content === 'string' ? content : content({ ...props, timeout })}
     </output>
-  </li>
+  </li>);
 });
